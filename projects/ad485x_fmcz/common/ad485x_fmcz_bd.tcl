@@ -21,8 +21,8 @@ set numb_of_ch [expr {$DEVICE eq {AD4858} ? 8 : \
                       $DEVICE eq {AD4855} ? 8 : \
                       $DEVICE eq {AD4854} ? 4 : \
                       $DEVICE eq {AD4853} ? 4 : \
-                      $DEVICE eq {AD4852} ? 4 : \
-                      $DEVICE eq {AD4851} ? 4 : 8}]
+                      $DEVICE eq {AD4852} ? 32 : \
+                      $DEVICE eq {AD4851} ? 16 : 8}]
 
 # ad485x interface
 
@@ -155,6 +155,24 @@ if {$LVDS_CMOS_N == "0"} {
 ad_connect  busy  axi_ad485x/busy
 ad_connect  lvds_cmos_n  axi_ad485x/lvds_cmos_n
 
+# adc-path event capture
+
+ad_ip_instance util_event_capture ad485x_event_capture
+ad_ip_parameter ad485x_event_capture CONFIG.NUM_OF_CHANNELS $numb_of_ch
+ad_ip_parameter ad485x_event_capture CONFIG.DW $data_width
+
+ad_connect  adc_clk     ad485x_event_capture/clk
+ad_connect  adc_reset   ad485x_event_capture/rst
+
+ad_ip_instance axi_gpio ad485x_threshold_gpio
+ad_ip_parameter ad485x_threshold_gpio CONFIG.C_GPIO_WIDTH $data_width
+ad_ip_parameter ad485x_threshold_gpio CONFIG.C_ALL_OUTPUTS 1
+
+ad_connect  ad485x_threshold_gpio/gpio_io_o ad485x_event_capture/threshold
+
+create_bd_port -dir O trigger_out
+ad_connect  ad485x_event_capture/trigger_out   trigger_out
+
 # adc-path channel pack
 
 ad_ip_instance util_cpack2 ad485x_adc_pack
@@ -163,13 +181,15 @@ ad_ip_parameter ad485x_adc_pack CONFIG.SAMPLE_DATA_WIDTH $data_width
 
 ad_connect adc_clk ad485x_adc_pack/clk
 ad_connect adc_reset ad485x_adc_pack/reset
-ad_connect axi_ad485x/adc_valid ad485x_adc_pack/fifo_wr_en
+ad_connect axi_ad485x/adc_valid ad485x_event_capture/valid_in
+ad_connect ad485x_event_capture/data_out_valid ad485x_adc_pack/fifo_wr_en
 ad_connect ad485x_adc_pack/packed_fifo_wr ad485x_dma/fifo_wr
 ad_connect ad485x_adc_pack/fifo_wr_overflow axi_ad485x/adc_dovf
 ad_connect ad485x_adc_pack/packed_sync ad485x_dma/sync
 
 for {set i 0} {$i < $numb_of_ch} {incr i} {
-  ad_connect axi_ad485x/adc_data_$i ad485x_adc_pack/fifo_wr_data_$i
+  ad_connect axi_ad485x/adc_data_$i ad485x_event_capture/data_in_$i
+  ad_connect ad485x_event_capture/data_out_$i ad485x_adc_pack/fifo_wr_data_$i
   ad_connect axi_ad485x/adc_enable_$i ad485x_adc_pack/enable_$i
 }
 
@@ -187,6 +207,7 @@ ad_cpu_interrupt ps-10 mb-10  ad485x_dma/irq
 ad_cpu_interconnect 0x43c00000 axi_ad485x
 ad_cpu_interconnect 0x43d00000 axi_pwm_gen
 ad_cpu_interconnect 0x43e00000 ad485x_dma
+ad_cpu_interconnect 0x43f00000 ad485x_threshold_gpio
 ad_cpu_interconnect 0x44000000 adc_clkgen
 
 ad_mem_hp1_interconnect sys_cpu_clk    sys_ps7/S_AXI_HP1

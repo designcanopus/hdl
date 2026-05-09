@@ -111,6 +111,8 @@ module system_top (
 
   wire            spiad_sck_s;
   wire            spiad_csn_s;
+  wire            trigger_out_s;
+  wire            capture_done_s;
 
   reg     [ 4:0]  cnt_cs_up = 3'd0;
 
@@ -234,6 +236,7 @@ module system_top (
     .adc_lane_7 (sdo[7]),
     .busy (busy),
     .cnv (cnv),
-    .lvds_cmos_n (lvds_cmos_n));
+    .lvds_cmos_n (lvds_cmos_n),
+    .trigger_out (trigger_out_s));
 
 endmodule
