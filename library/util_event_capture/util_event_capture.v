@@ -191,14 +191,10 @@ module util_event_capture #(
     end
     else begin
 
-      // -------------------------------------------------------------
-      // Pulse-only defaults
-      // -------------------------------------------------------------
+      // Only assert valid during the replay phase
+      data_out_valid <= 1'b0;
       trigger_out    <= 1'b0;
       capture_done   <= 1'b0;
-
-      // Always keep IIO DMA alive at the ADC rate
-      data_out_valid <= valid_in;
 
       case (state)
 
@@ -206,16 +202,6 @@ module util_event_capture #(
       // WAIT_TRIGGER
       // =============================================================
       WAIT_TRIGGER: begin
-        // Keep streaming zeros so IIO DMA never starves
-        data_out_0     <= {DW{1'b0}};
-        data_out_1     <= {DW{1'b0}};
-        data_out_2     <= {DW{1'b0}};
-        data_out_3     <= {DW{1'b0}};
-        data_out_4     <= {DW{1'b0}};
-        data_out_5     <= {DW{1'b0}};
-        data_out_6     <= {DW{1'b0}};
-        data_out_7     <= {DW{1'b0}};
-
         if (trigger_event) begin
 
           trigger_out <= 1'b1;
@@ -238,16 +224,6 @@ module util_event_capture #(
       // CAPTURE
       // =============================================================
       CAPTURE: begin
-        // Still stream zeros while collecting post-trigger samples
-        data_out_0     <= {DW{1'b0}};
-        data_out_1     <= {DW{1'b0}};
-        data_out_2     <= {DW{1'b0}};
-        data_out_3     <= {DW{1'b0}};
-        data_out_4     <= {DW{1'b0}};
-        data_out_5     <= {DW{1'b0}};
-        data_out_6     <= {DW{1'b0}};
-        data_out_7     <= {DW{1'b0}};
-
         if (valid_in) begin
 
           capture_count <= capture_count + 1'b1;
@@ -262,70 +238,63 @@ module util_event_capture #(
       // OUTPUT_PREP
       // =============================================================
       OUTPUT_PREP: begin
-        // Assert valid here so there is no one-cycle gap
-        data_out_valid <= 1'b1;
-        data_out_0     <= {DW{1'b0}};
-        data_out_1     <= {DW{1'b0}};
-        data_out_2     <= {DW{1'b0}};
-        data_out_3     <= {DW{1'b0}};
-        data_out_4     <= {DW{1'b0}};
-        data_out_5     <= {DW{1'b0}};
-        data_out_6     <= {DW{1'b0}};
-        data_out_7     <= {DW{1'b0}};
+        if (valid_in) begin
+          // Prime the pipeline
+          q_reg_0 <= mem_0[rd_ptr];
+          q_reg_1 <= mem_1[rd_ptr];
+          q_reg_2 <= mem_2[rd_ptr];
+          q_reg_3 <= mem_3[rd_ptr];
+          q_reg_4 <= mem_4[rd_ptr];
+          q_reg_5 <= mem_5[rd_ptr];
+          q_reg_6 <= mem_6[rd_ptr];
+          q_reg_7 <= mem_7[rd_ptr];
 
-        // Prime the pipeline
-        q_reg_0 <= mem_0[rd_ptr];
-        q_reg_1 <= mem_1[rd_ptr];
-        q_reg_2 <= mem_2[rd_ptr];
-        q_reg_3 <= mem_3[rd_ptr];
-        q_reg_4 <= mem_4[rd_ptr];
-        q_reg_5 <= mem_5[rd_ptr];
-        q_reg_6 <= mem_6[rd_ptr];
-        q_reg_7 <= mem_7[rd_ptr];
-
-        rd_ptr <=
-            (rd_ptr + 1'b1) &
-            (DEPTH - 1);
-        output_count <= 0;
-        state <= OUTPUT;
+          rd_ptr <=
+              (rd_ptr + 1'b1) &
+              (DEPTH - 1);
+          output_count <= 0;
+          state <= OUTPUT;
+        end
       end
 
       // =============================================================
       // OUTPUT
       // =============================================================
       OUTPUT: begin
-        // Always assert valid during replay for constant-rate DMA
-        data_out_valid <= 1'b1;
+        if (valid_in) begin
+          // Assert valid only when driving real data
+          data_out_valid <= 1'b1;
 
-        // Present aligned BRAM data
-        data_out_0 <= q_reg_0;
-        data_out_1 <= q_reg_1;
-        data_out_2 <= q_reg_2;
-        data_out_3 <= q_reg_3;
-        data_out_4 <= q_reg_4;
-        data_out_5 <= q_reg_5;
-        data_out_6 <= q_reg_6;
-        data_out_7 <= q_reg_7;
+          // Present aligned BRAM data
+          data_out_0 <= q_reg_0;
+          data_out_1 <= q_reg_1;
+          data_out_2 <= q_reg_2;
+          data_out_3 <= q_reg_3;
+          data_out_4 <= q_reg_4;
+          data_out_5 <= q_reg_5;
+          data_out_6 <= q_reg_6;
+          data_out_7 <= q_reg_7;
 
-        // Fetch next sample
-        q_reg_0 <= mem_0[rd_ptr];
-        q_reg_1 <= mem_1[rd_ptr];
-        q_reg_2 <= mem_2[rd_ptr];
-        q_reg_3 <= mem_3[rd_ptr];
-        q_reg_4 <= mem_4[rd_ptr];
-        q_reg_5 <= mem_5[rd_ptr];
-        q_reg_6 <= mem_6[rd_ptr];
-        q_reg_7 <= mem_7[rd_ptr];
+          // Fetch next sample
+          q_reg_0 <= mem_0[rd_ptr];
+          q_reg_1 <= mem_1[rd_ptr];
+          q_reg_2 <= mem_2[rd_ptr];
+          q_reg_3 <= mem_3[rd_ptr];
+          q_reg_4 <= mem_4[rd_ptr];
+          q_reg_5 <= mem_5[rd_ptr];
+          q_reg_6 <= mem_6[rd_ptr];
+          q_reg_7 <= mem_7[rd_ptr];
 
-        rd_ptr <=
-            (rd_ptr + 1'b1) &
-            (DEPTH - 1);
+          rd_ptr <=
+              (rd_ptr + 1'b1) &
+              (DEPTH - 1);
 
-        output_count <= output_count + 1'b1;
+          output_count <= output_count + 1'b1;
 
-        if (output_count == (TOTAL_WINDOW - 1)) begin
-          capture_done <= 1'b1;
-          state <= WAIT_TRIGGER;
+          if (output_count == (TOTAL_WINDOW - 1)) begin
+            capture_done <= 1'b1;
+            state <= WAIT_TRIGGER;
+          end
         end
       end
 
