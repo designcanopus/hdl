@@ -1,7 +1,7 @@
 #!/usr/bin/perl -w
 
 ###############################################################################
-## Copyright (C) 2022-2023, 2026 Analog Devices, Inc. All rights reserved.
+## Copyright (C) 2022-2023 Analog Devices, Inc. All rights reserved.
 ### SPDX short identifier: ADIBSD
 #
 # This script is meant to be used together with gtwizard_generator.tcl
@@ -200,7 +200,6 @@ sub xcvr_diff {
   while (my $fline = <READFILE>) {
     push(@File, $fline);
   }
-  close(READFILE) or die print "@[$myname] Can not close file called $pfile.\n";
 
   # Find the GT's attributes location in the file
   my $gt_paramblock_start = 0;
@@ -213,24 +212,9 @@ sub xcvr_diff {
       $gt_paramblock_end = $i;
     }
   }
+  close(READFILE) or die print "@[$myname] Can not close file called $pfile.\n";
 
-  ## Extract base file name for the diff output
-  my $file_name = $pfile;
-  $file_name =~ s/^.*\///;
-  $file_name =~ s/\.v$//;
-
-  my $git_exit_code = system("git rev-parse --is-inside-work-tree >/dev/null 2>&1");
-  if ($git_exit_code != 0) {
-    print "WARNING: ADI's util_xcvr's can not be updated, because the current directory is NOT an HDL repository!\n";
-    return 0;
-  }
-
-  ## Create a copy of the original file and stage it
-  my $pfile_copy = $pfile . ".new";
-  system "cp $pfile $pfile_copy";
-  system "git add $pfile_copy";
-
-  ## Update the attributes with the generated values on the copy
+  ## Update the attributes with the generated values
   for my $i ($gt_paramblock_start..$gt_paramblock_end) {
     if ($File[$i] =~ m/\.\w*/) { ## it match a word which starts with a dot
       my $param = $File[$i];
@@ -245,19 +229,26 @@ sub xcvr_diff {
     }
   }
 
-  # Write the modified content to the copy
-  open(WRITEFILE, ">$pfile_copy") or die print "@[$myname] Can not open file called $pfile_copy for writing.\n";
+  # Try to open file for write
+  open(WRITEFILE, ">$pfile") or die print "@[$myname] Can not open file called $pfile for writing.\n";
+
   foreach my $line (@File){
     print WRITEFILE $line;
   }
-  close(WRITEFILE) or die print "@[$myname] Can not close file called $pfile_copy.\n";
+  close(WRITEFILE) or die print "@[$myname] Can not close file called $pfile.\n";
 
-  ## Generate diff between the staged (original) copy and the modified copy
-  system "git diff $pfile_copy > $file_name.diff";
+  ## save the diff between the current and updated XCVR files
+  my $file_name = $pfile;
+  $file_name =~ s/^.*\///;
+  $file_name =~ s/\.v$//;
 
-  ## Unstage and remove the copy to keep the repo clean
-  system "git rm --cached -f $pfile_copy >/dev/null 2>&1";
-  unlink $pfile_copy;
+  my $check_git = `git status`;
+  if ($check_git =~ m/On branch/i) {
+    system "git diff $pfile > $file_name.diff";
+    system "git checkout -- $pfile";
+  } else {
+    print "WARNING: ADI's util_xcvr's can not be updated, because the current direcotry is NOT an HDL repository!\n";
+  }
 
 }
 
@@ -382,12 +373,12 @@ sub gen_drp_cmd {
     #print "$param_value\n";
     ## ignore all attributes which are related to unused features and
     ## double check attribute validity
-    if ($param_name =~ /^(?!ES_)(?!PCIE_)/) {
+    if ($param_name =~ /^(?!ES_)(?!PCIE_)(?!TXPI_)(?!TX_PI_BIASSET)/) {
       if (exists $$xcvr_params_ref{$param_name}) {
         my $param_value_hex = $param_value;
         $param_value_hex =~ s/^.*'b//;
         ## convert to hex only if it's a binary number, leave it as it is otherwise
-        if ($param_value_hex =~ /^[0-1]+$/ && length($param_value_hex) > 1) {
+        if ($param_value_hex =~ /^[0-1]+$/) {
           $param_value_hex = sprintf('0x%X', oct("0b$param_value_hex"));
         }
         #$t3->row($param_name, $param_value, $param_value_hex);

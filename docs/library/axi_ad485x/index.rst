@@ -5,8 +5,8 @@ AXI AD485x
 
 .. hdl-component-diagram::
 
-The :git-hdl:`AXI AD485x <library/axi_ad485x>` IP core can be used to interface
-the :adi:`AD4851` to :adi:`AD4858` devices.
+The :git-hdl:`AXI AD485x <library/axi_ad485x>` IP core is configured to
+support the :adi:`AD4857` device only in this design.
 This documentation only covers the IP core and requires one to be
 familiar with the device, for a complete and better understanding.
 
@@ -188,7 +188,7 @@ The DATA is the raw analog samples. It follows two simple rules.
 Device (AD485x) Interface Description
 --------------------------------------------------------------------------------
 
-For the :git-hdl:`axi_ad4858 CMOS interface <library/axi_ad485x/axi_ad485x_cmos.v>`
+For the :git-hdl:`axi_ad485x CMOS interface <library/axi_ad485x/axi_ad485x_cmos.v>`
 module, data is de-serialized according to the number of active lanes and the
 number of active channels.
 :git-hdl:`up_adc_common <library/common/up_adc_common.v>` module implements
@@ -387,13 +387,6 @@ References
 -------------------------------------------------------------------------------
 
 * :git-hdl:`library/axi_ad485x`
-* :adi:`AD4858`
 * :adi:`AD4857`
-* :adi:`AD4856`
-* :adi:`AD4855`
-* :adi:`AD4854`
-* :adi:`AD4853`
-* :adi:`AD4852`
-* :adi:`AD4851`
 * :xilinx:`Zynq-7000 SoC Overview <support/documentation/data_sheets/ds190-Zynq-7000-Overview.pdf>`
 * :xilinx:`Zynq-7000 SoC Packaging and Pinout <support/documentation/user_guides/ug865-Zynq-7000-Pkg-Pinout.pdf>`
