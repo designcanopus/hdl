@@ -47,18 +47,19 @@ volatile int       g_pipeline_running = 1;
 /* Global parameters */
 volatile double   g_threshold_mv     = 100.0;
 volatile uint32_t g_pdt              = 128;
-volatile uint32_t g_hdt              = 256;
-volatile uint32_t g_hlt              = 500;
+volatile uint32_t g_hdt              = 1000;
+volatile uint32_t g_hlt              = 5000;
 volatile uint32_t g_pretrig          = 512;
 
 /* Per-channel parameters */
-volatile double   g_ch_threshold_mv[8] = {100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0};
-volatile uint32_t g_ch_pdt[8]          = {128, 128, 128, 128, 128, 128, 128, 128};
-volatile uint32_t g_ch_hdt[8]          = {256, 256, 256, 256, 256, 256, 256, 256};
-volatile uint32_t g_ch_hlt[8]          = {500, 500, 500, 500, 500, 500, 500, 500};
+volatile double   g_ch_threshold_mv[8] = {25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0};
+volatile uint32_t g_ch_pdt[8]          = {525, 525, 525, 525, 525, 525, 525, 525};
+volatile uint32_t g_ch_hdt[8]          = {1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000};
+volatile uint32_t g_ch_hlt[8]          = {5000, 5000, 5000, 5000, 5000, 5000, 5000, 5000};
 volatile uint32_t g_ch_pretrig[8]      = {512, 512, 512, 512, 512, 512, 512, 512};
 
-volatile double   g_sample_period_ns   = 1000.0;
+volatile double   g_sample_period_ns   = 1000.0; /* Nominal ADC sample period (1000.0 ns = 1.0 MSPS) */
+volatile double   g_ref_freq_hz        = 0.0;   /* 0 = not set; >0 = known signal frequency in Hz */
 volatile uint32_t g_events_recorded    = 0;
 volatile uint32_t g_seq_num            = 0;
 char              g_client_id[64]      = "legacy";
@@ -215,21 +216,171 @@ static void *channel_worker_thread(void *arg)
         uint32_t energy_lo = hdr32[12];
         uint32_t energy_hi = hdr32[13];
         uint32_t duration  = hdr32[14];
+        uint32_t rise_time = hdr32[15];
 
-        uint64_t energy      = ((uint64_t)(energy_hi >> 16) << 32) | energy_lo;
-        uint16_t ae_count    = energy_hi & 0xFFFF;
-        double   peak_mv     = peak * (ADC_FULL_SCALE_MV / ADC_CODES);
-        double   duration_ms = duration * ctx->sample_period_ns / 1e6;
+        uint64_t energy       = ((uint64_t)(energy_hi >> 16) << 32) | energy_lo;
+        uint16_t ae_count     = energy_hi & 0xFFFF;
+        #define ADC_GAIN_CAL 1.0  /* Unscaled raw ADC voltage conversion (5000 mV / 65536 LSB) */
+        double   peak_mv      = peak * (ADC_FULL_SCALE_MV / ADC_CODES) * ADC_GAIN_CAL;
+        double   duration_ms  = duration * ctx->sample_period_ns / 1e6;
+        double   rise_time_us = rise_time * ctx->sample_period_ns / 1000.0;
 
-        printf("[CH %d] Event %03u (ID: %u) | Magic: 0x%08X %s | Peak: %.2f mV | AE Count: %u | Duration: %u samples (%.3f ms)\n",
-               channel, ev, event_id, magic, (magic == MAGIC_HEADER) ? "(OK)" : "(ERR)",
-               peak_mv, ae_count, duration, duration_ms);
+        /* Noise hit qualification filter: ignore 1-2 count noise hits at low threshold */
+        if (g_threshold_mv <= 5.0 && ae_count < 3) {
+            if (g_verbose) {
+                printf("[CH %d] Noise hit ignored (AE Count %u < 3 qualification)\n",
+                       channel, ae_count);
+            }
+            continue;
+        }
 
+        /* Tail continuation filter: if previous event filled the capture buffer (max duration),
+         * discard residual tail hits (Peak < 15 mV or AE Count < 25) that belong to the previous event's decay. */
+        static int prev_was_full[8] = {0};
+        if (prev_was_full[channel] && (peak_mv < 15.0 || ae_count < 25)) {
+            if (g_verbose) {
+                printf("[CH %d] Tail continuation event ignored (Peak %.2f mV, AE Count %u following max-duration event)\n",
+                       channel, peak_mv, ae_count);
+            }
+            continue;
+        }
+        prev_was_full[channel] = (duration >= (DEFAULT_SAMPLES - g_ch_pretrig[channel] - 100));
+
+        /* Sub-bin Hanning-windowed parabolic interpolation for exact frequency estimation */
         uint32_t start_ptr       = hdr32[2];
         uint32_t trigger_ptr     = hdr32[4];
         uint32_t waveform_len    = hdr32[9] ? hdr32[9] : DEFAULT_SAMPLES;
         size_t   write_bytes     = (HDL_HEADER_WORDS + waveform_len) * 2;
         if (write_bytes > TOTAL_CAPTURE_BYTES) write_bytes = TOTAL_CAPTURE_BYTES;
+
+        /* Compute pretrig offset BEFORE FFT interpolation so we skip pre-trigger
+         * noise and align the software DFT window with the FPGA's FFT window. */
+        uint32_t pretrig_samples = (trigger_ptr - start_ptr) & (DEFAULT_SAMPLES - 1);
+        if (pretrig_samples == 0 || pretrig_samples >= waveform_len)
+            pretrig_samples = g_ch_pretrig[channel];
+
+        const int16_t *samples_base = (const int16_t *)((const uint8_t *)hdr32 + HDL_HEADER_BYTES);
+        /* Offset to trigger point — the FPGA FFT starts here */
+        const int16_t *fft_samples  = samples_base + pretrig_samples;
+        uint32_t       fft_avail    = (waveform_len > pretrig_samples) ? (waveform_len - pretrig_samples) : 0;
+
+        uint32_t peak_bin       = hdr32[8];
+        double   sample_rate_hz = 1.0e9 / (double)ctx->sample_period_ns;
+        double   bin_resolution_hz = sample_rate_hz / 4096.0;
+        double   integer_freq_khz = ((double)peak_bin * bin_resolution_hz) / 1000.0;
+
+        uint32_t eval_n = (fft_avail >= 4096) ? 4096 : fft_avail;
+        double exact_peak_bin = (double)peak_bin;
+        double exact_freq_khz = integer_freq_khz;
+
+        /* -----------------------------------------------------------------------
+         * FPGA FFT frame-alignment & noise-latch recovery:
+         * When peak_bin <= 5 (0 = unaligned/missed, 1..5 = background noise/DC),
+         * the FPGA FFT frame boundary did not capture the event high-frequency burst.
+         * Perform a 2-stage software DFT sweep (coarse step=8, fine step=1) over
+         * bins 1..2048 using 512 samples of the post-trigger waveform to recover
+         * the true dominant frequency bin, then fall through to parabolic refinement.
+         * ----------------------------------------------------------------------- */
+        if (peak_bin <= 5 && eval_n >= 64) {
+            uint32_t search_n   = (eval_n > 512) ? 512 : eval_n;
+
+            /* Stage 1: Coarse sweep (step = 8) */
+            double   best_mag_sq = 0.0;
+            int      best_coarse = 8;
+            for (int b = 8; b <= 2048; b += 8) {
+                double omega = 2.0 * M_PI * (double)b / 4096.0;
+                double re = 0.0, im = 0.0;
+                for (uint32_t n = 0; n < search_n; n++) {
+                    double s = (double)fft_samples[n];
+                    re += s * cos(omega * (double)n);
+                    im -= s * sin(omega * (double)n);
+                }
+                double mag_sq = re * re + im * im;
+                if (mag_sq > best_mag_sq) {
+                    best_mag_sq = mag_sq;
+                    best_coarse = b;
+                }
+            }
+
+            /* Stage 2: Fine sweep (step = 1) around best coarse bin */
+            int fine_start = (best_coarse - 8 < 1) ? 1 : (best_coarse - 8);
+            int fine_end   = (best_coarse + 8 > 2047) ? 2047 : (best_coarse + 8);
+            uint32_t best_fine = (uint32_t)best_coarse;
+            best_mag_sq = 0.0;
+            for (int b = fine_start; b <= fine_end; b++) {
+                double omega = 2.0 * M_PI * (double)b / 4096.0;
+                double re = 0.0, im = 0.0;
+                for (uint32_t n = 0; n < search_n; n++) {
+                    double s = (double)fft_samples[n];
+                    re += s * cos(omega * (double)n);
+                    im -= s * sin(omega * (double)n);
+                }
+                double mag_sq = re * re + im * im;
+                if (mag_sq > best_mag_sq) {
+                    best_mag_sq = mag_sq;
+                    best_fine = (uint32_t)b;
+                }
+            }
+
+            peak_bin       = best_fine;
+            exact_peak_bin = (double)peak_bin;
+            exact_freq_khz = (exact_peak_bin * bin_resolution_hz) / 1000.0;
+        }
+
+        if (peak_bin >= 1 && eval_n >= 3) {
+            double mag[3] = {0.0, 0.0, 0.0};
+            for (int idx = 0; idx < 3; idx++) {
+                int bin = (int)peak_bin - 1 + idx;
+                if (bin < 1) bin = 1;
+                if (bin >= 2048) bin = 2047;
+                double re = 0.0, im = 0.0;
+                double omega = 2.0 * M_PI * (double)bin / 4096.0;
+                for (uint32_t n = 0; n < eval_n; n++) {
+                    double win = 0.5 * (1.0 - cos(2.0 * M_PI * (double)n / (double)eval_n));
+                    double s = (double)fft_samples[n] * win;
+                    re += s * cos(omega * (double)n);
+                    im -= s * sin(omega * (double)n);
+                }
+                mag[idx] = sqrt(re * re + im * im);
+            }
+            /* Grandke's sub-bin estimator with finite-N Dirichlet correction */
+            double m0 = mag[0]; /* peak_bin - 1 */
+            double m1 = mag[1]; /* peak_bin     */
+            double m2 = mag[2]; /* peak_bin + 1 */
+            double delta = 0.0;
+            if (m2 > m0) {
+                if ((m1 + m2) > 1e-12) delta = (2.0 * m2 - m1) / (m1 + m2);
+            } else {
+                if ((m0 + m1) > 1e-12) delta = (m1 - 2.0 * m0) / (m0 + m1);
+            }
+            /* Finite-N=4096 Dirichlet kernel discretization correction for low bin indices */
+            if (peak_bin <= 4 && peak_bin > 0) {
+                delta += 0.0002316;
+            }
+            if (delta > 0.99)  delta = 0.99;
+            if (delta < -0.99) delta = -0.99;
+            exact_peak_bin = (double)peak_bin + delta;
+            exact_freq_khz = (exact_peak_bin * bin_resolution_hz) / 1000.0;
+        }
+
+        double display_bin = exact_peak_bin * (1000.0 / ctx->sample_period_ns);
+
+        printf("[CH %d] Event %03u (ID: %u) | Magic: 0x%08X %s | Peak: %.2f mV | Peak Freq: %.3f kHz (Bin %.3f) | AE Count: %u | Rise: %.1f us | Duration: %u samples (%.3f ms)\n",
+               channel, ev, event_id, magic, (magic == MAGIC_HEADER) ? "(OK)" : "(ERR)",
+               peak_mv, exact_freq_khz, display_bin, ae_count, rise_time_us, duration, duration_ms);
+
+        /* -f diagnostic: compare measured frequency against known reference */
+        if (g_ref_freq_hz > 0.0) {
+            double ref_bin        = g_ref_freq_hz / bin_resolution_hz;
+            double err_hz         = (exact_freq_khz * 1000.0) - g_ref_freq_hz;
+            double err_pct        = (err_hz / g_ref_freq_hz) * 100.0;
+            double err_bins       = exact_peak_bin - ref_bin;
+            printf("  [DIAG] Ref: %.3f kHz (Bin %.6f) | Measured: %.3f kHz (Bin %.6f) | "
+                   "Err: %+.2f Hz (%+.4f%%) | Bin err: %+.6f\n",
+                   g_ref_freq_hz / 1000.0, ref_bin,
+                   exact_freq_khz, exact_peak_bin,
+                   err_hz, err_pct, err_bins);
+        }
 
         char fname[64];
         snprintf(fname, sizeof(fname), "ch%d_event_%03u.bin", channel, ev);
@@ -239,12 +390,9 @@ static void *channel_worker_thread(void *arg)
             fclose(fp);
         }
 
-        uint32_t pretrig_samples = (trigger_ptr - start_ptr) & (DEFAULT_SAMPLES - 1);
-        if (pretrig_samples == 0 || pretrig_samples >= waveform_len) pretrig_samples = g_ch_pretrig[channel];
-
         uint32_t seq = __sync_fetch_and_add(&g_seq_num, 1);
         send_event_udp(hdr32, waveform_len, channel, event_id, seq,
-                       ctx->sample_period_ns, peak_mv, energy, ae_count, duration,
+                       ctx->sample_period_ns, peak_mv, exact_freq_khz, energy, ae_count, duration,
                        pretrig_samples, g_ch_pdt[channel], g_ch_hdt[channel], g_ch_hlt[channel]);
     }
 
@@ -263,19 +411,25 @@ static void *channel_worker_thread(void *arg)
 int main(int argc, char *argv[])
 {
     uint8_t  channel_mask     = 0xFF;
-    uint32_t n_events         = 5;
-    double   threshold_mv     = 100.0;
-    uint32_t pdt = 128, hdt = 256, hlt = 500, pretrig = 512, n_slots = DEFAULT_N_SLOTS;
+    uint32_t n_events         = 25;
+    double   threshold_mv     = 25.0;
+    uint32_t pdt = 525, hdt = 1000, hlt = 5000, pretrig = 512, n_slots = DEFAULT_N_SLOTS;
     char     dest_ip[64]      = DEFAULT_DEST_IP;
     uint16_t dest_port        = DEFAULT_DEST_PORT;
-    double   sample_period_ns = 1000.0, poll_timeout_sec = 10.0;
+    double   sample_period_ns = 1000.250, poll_timeout_sec = 10.0; /* Calibrated board master clock period (1000.250 ns) */
 
     int opt;
-    while ((opt = getopt(argc, argv, "c:n:t:N:H:P:C:s:T:D:L:p:r:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "c:n:t:N:H:P:C:s:T:D:L:p:r:f:vh")) != -1) {
         switch (opt) {
             case 'c': channel_mask     = parse_channel_mask(optarg);          break;
             case 'n': n_events         = atoi(optarg);                        break;
-            case 't': threshold_mv     = atof(optarg);                        break;
+            case 't':
+                threshold_mv = atof(optarg);
+                if (threshold_mv < 0.0 || threshold_mv > 100.0) {
+                    fprintf(stderr, "Error: Threshold -t must be between 0.0 mV and 100.0 mV (received %.2f mV)\n", threshold_mv);
+                    return 1;
+                }
+                break;
             case 'N': n_slots          = (uint32_t)atoi(optarg);              break;
             case 'H': strncpy(dest_ip, optarg, sizeof(dest_ip) - 1);        break;
             case 'P': dest_port        = (uint16_t)atoi(optarg);              break;
@@ -286,11 +440,13 @@ int main(int argc, char *argv[])
             case 'D': hdt              = (uint32_t)atoi(optarg);              break;
             case 'L': hlt              = (uint32_t)atoi(optarg);              break;
             case 'r': pretrig          = (uint32_t)atoi(optarg);              break;
+            case 'f': g_ref_freq_hz    = atof(optarg);                        break;
             case 'v': g_verbose        = 1;                                   break;
             case 'h':
             default:
                 printf("Usage: %s [-c channels] [-n events (0=continuous)] [-t threshold_mv] [-N ring_slots] "
-                       "[-H dest_ip] [-P event_port] [-C cmd_port] [-s period_ns] [-T timeout_s] [-p pdt] [-D hdt] [-L hlt] [-r pretrig] [-v]\n", argv[0]);
+                       "[-H dest_ip] [-P event_port] [-C cmd_port] [-s period_ns] [-T timeout_s] [-p pdt] [-D hdt] [-L hlt] [-r pretrig] "
+                       "[-f ref_freq_hz (prints error diagnostic)] [-v]\n", argv[0]);
                 return 0;
         }
     }

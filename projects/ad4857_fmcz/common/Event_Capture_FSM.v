@@ -63,7 +63,10 @@ module Event_Capture_FSM #(
     output reg [31:0]       reg_peak_time,
     output reg [31:0]       reg_hit_dur,
     output reg [31:0]       reg_hit_cnt,
-    output reg [31:0]       reg_rise_time
+    output reg [31:0]       reg_rise_time,
+
+    // FPGA FFT Peak Frequency Bin
+    input      [31:0]       fft_peak_bin
 );
 
     //----------------------------------------------------------------------
@@ -93,6 +96,7 @@ module Event_Capture_FSM #(
     reg [ADDR_W-1:0] start_ptr;
     reg [ADDR_W-1:0] end_ptr;
     reg [DW-1:0]     mem_q;
+    reg              buffer_full;
 
     // Accumulator Control Signals
     assign accum_init = (state == WAIT_TRIGGER) && trigger_event;
@@ -139,6 +143,7 @@ module Event_Capture_FSM #(
             reg_hit_cnt      <= 0;
             reg_rise_time    <= 0;
             event_id_counter <= 0;
+            buffer_full      <= 1'b0;
         end else begin
             trigger_out  <= 1'b0;
             capture_done <= 1'b0;
@@ -181,6 +186,7 @@ module Event_Capture_FSM #(
                                                                : hdt_timer + 1'b1;
 
                         if ((next_hdt_timer >= reg_hdt) || (acc_hit_dur >= (DEPTH - reg_pretrig))) begin
+                            buffer_full <= (acc_hit_dur >= (DEPTH - reg_pretrig));
                             end_ptr       <= wr_ptr;
                             total_samples <= ((reg_pretrig + acc_hit_dur) > DEPTH) ? DEPTH : (reg_pretrig + acc_hit_dur);
                             rd_ptr        <= start_ptr;
@@ -195,7 +201,7 @@ module Event_Capture_FSM #(
                             reg_rise_time <= acc_rise_time;
 
                             // Phase 2 Header: status, length, and feature fields
-                            header_regs[8]  <= 32'h0;            // Flags
+                            header_regs[8]  <= fft_peak_bin;      // FPGA FFT Peak Frequency Bin (hdr32[8])
                             header_regs[9]  <= ((reg_pretrig + acc_hit_dur) > DEPTH) ? DEPTH : (reg_pretrig + acc_hit_dur);             // Waveform length
                             header_regs[10] <= 32'h00010000;      // Version 1.0
                             header_regs[11] <= acc_peak_val;
@@ -251,6 +257,7 @@ module Event_Capture_FSM #(
                             capture_done     <= 1'b1;
                             event_id_counter <= event_id_counter + 1'b1;
                             hlt_counter      <= 0;
+                            hdt_timer        <= 0;
                             state            <= LOCKOUT;
                         end
                     end
@@ -264,11 +271,25 @@ module Event_Capture_FSM #(
                 // --------------------------------------------------------
                 LOCKOUT: begin
                     if (s_axis_tvalid) begin
-                        if (hlt_counter + 1 >= reg_hlt) begin
-                            hlt_counter <= 0;
-                            state       <= WAIT_TRIGGER;
-                        end else begin
+                        if (hlt_counter + 1 < reg_hlt) begin
                             hlt_counter <= hlt_counter + 1'b1;
+                            hdt_timer   <= 0;
+                        end else if (buffer_full) begin
+                            // Buffer was full — wait for signal to drop below threshold for 4x reg_hdt quiet samples before re-arming
+                            if (sample_over_threshold) begin
+                                hdt_timer <= 0;
+                            end else if (hdt_timer + 1 >= (reg_hdt << 2)) begin
+                                hdt_timer   <= 0;
+                                hlt_counter <= 0;
+                                buffer_full <= 1'b0;
+                                state       <= WAIT_TRIGGER;
+                            end else begin
+                                hdt_timer <= hdt_timer + 1'b1;
+                            end
+                        end else begin
+                            hlt_counter <= 0;
+                            hdt_timer   <= 0;
+                            state       <= WAIT_TRIGGER;
                         end
                     end
                 end

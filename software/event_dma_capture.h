@@ -16,6 +16,11 @@
 #include <time.h>
 #include <signal.h>
 #include <pthread.h>
+#include <math.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 /* ---------- Hardware Mapping ---------- */
 #define UIO_NAME_DMA "dmem-uio"

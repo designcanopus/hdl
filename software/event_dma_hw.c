@@ -110,6 +110,7 @@ int wait_dma_done(volatile uint32_t *dma_regs, uint32_t xfer_id)
 /* Automatically enable ADC conversion clock if idle */
 void enable_adc_sampling(void)
 {
+    /* Step 1: Enable IIO buffer to start CNV sampling clock generation */
     for (int dev = 1; dev < 5; dev++) {
         char scanpath[128];
         snprintf(scanpath, sizeof(scanpath),
@@ -124,21 +125,21 @@ void enable_adc_sampling(void)
             int ret = system(cmd);
             (void)ret;
             if (g_verbose) printf("Enabled CNV sampling clock on IIO device%d\n", dev);
-            return;
+            break;
         }
     }
 
+    /* Step 2: Ensure axi_pwm_gen is set to 100 clock cycles (1000 ns = 1.0 MHz sampling) */
     int fd_mem = open("/dev/mem", O_RDWR | O_SYNC);
     if (fd_mem >= 0) {
         volatile uint32_t *pwm = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
                                       MAP_SHARED, fd_mem, 0x43d00000);
         if (pwm != MAP_FAILED) {
-            pwm[0x40 / 4] = 8; /* PERIOD */
-            pwm[0x44 / 4] = 1; /* DUTY */
-            pwm[0x10 / 4] = 1; /* ENABLE */
-            pwm[0x14 / 4] = 1; /* LOAD */
+            pwm[0x40 / 4] = 100; /* PERIOD = 100 cycles (1000 ns = 1.0 MHz sampling) */
+            pwm[0x44 / 4] = 1;   /* DUTY */
+            pwm[0x10 / 4] = 2;   /* LOAD_CONFIG (Bit 1 = 1) */
             munmap((void *)pwm, 0x1000);
-            if (g_verbose) printf("Forced CNV clock via axi_pwm_gen (0x43d00000)\n");
+            if (g_verbose) printf("Auto-configured CNV clock via axi_pwm_gen (1.0 MHz, 1000 ns)\n");
         }
         close(fd_mem);
     }

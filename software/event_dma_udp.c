@@ -155,6 +155,8 @@ void *command_listener_thread(void *arg)
             if (parse_json_num(buf, "\"trigger_mv\"", &trig_mv) ||
                 parse_json_num(buf, "\"threshold_mv\"", &trig_mv) ||
                 parse_json_num(buf, "\"threshold\"", &trig_mv)) {
+                if (trig_mv < 0.0)   trig_mv = 0.0;
+                if (trig_mv > 100.0) trig_mv = 100.0;
                 g_threshold_mv = trig_mv;
                 int32_t thresh_lsb = (int32_t)(g_threshold_mv * (ADC_CODES / ADC_FULL_SCALE_MV));
                 for (int ch = 0; ch < 8; ch++) {
@@ -244,7 +246,7 @@ void *status_broadcast_thread(void *arg)
 /* UDP Event Transmission */
 int send_event_udp(const uint32_t *hdr32, uint32_t n_samples,
                    int channel, uint32_t event_id, uint32_t seq_num,
-                   double sample_period_ns, double peak_mv,
+                   double sample_period_ns, double peak_mv, double peak_freq_khz,
                    uint64_t energy, uint16_t ae_count, uint32_t duration,
                    uint32_t pretrig_samples, uint32_t pdt_samples,
                    uint32_t hdt_samples, uint32_t hlt_samples)
@@ -295,6 +297,7 @@ int send_event_udp(const uint32_t *hdr32, uint32_t n_samples,
         "\"threshold_release\":%.2f,"
         "\"features\":{"
         "\"peak_amplitude\":%.4f,"
+        "\"peak_frequency_khz\":%.2f,"
         "\"energy\":%llu,"
         "\"duration_us\":%.3f,"
         "\"duration_ms\":%.4f,"
@@ -306,7 +309,7 @@ int send_event_udp(const uint32_t *hdr32, uint32_t n_samples,
         sample_rate_hz, pre_trig_us, pdt_us, hdt_us, hlt_us,
         pre_trig_ms, pdt_ms, hdt_ms, hlt_ms,
         thresh_mv, thresh_mv * 0.5,
-        peak_mv, (unsigned long long)energy, duration_us, duration_ms, ae_count,
+        peak_mv, peak_freq_khz, (unsigned long long)energy, duration_us, duration_ms, ae_count,
         pretrig_samples);
 
     if (json_len < 0 || (size_t)json_len >= sizeof(json)) return -1;

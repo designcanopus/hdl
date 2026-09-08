@@ -49,7 +49,10 @@ module Event_Capture #(
     output [DW-1:0]         m_axis_tdata,
     output                  m_axis_tvalid,
     input                   m_axis_tready,
-    output                  m_axis_tlast
+    output                  m_axis_tlast,
+
+    // FPGA FFT Peak Frequency Bin
+    input  [31:0]           fft_peak_bin
 );
 
     // ADC input stream is always ready
@@ -280,7 +283,9 @@ module Event_Capture #(
         .reg_peak_time        ( latched_peak_time     ),
         .reg_hit_dur          ( latched_hit_dur       ),
         .reg_hit_cnt          ( latched_hit_cnt       ),
-        .reg_rise_time        ( latched_rise_time     )
+        .reg_rise_time        ( latched_rise_time     ),
+
+        .fft_peak_bin         ( fft_peak_bin          )
     );
 
 endmodule

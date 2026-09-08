@@ -19,7 +19,7 @@ void *status_broadcast_thread(void *arg);
 
 int   send_event_udp(const uint32_t *hdr32, uint32_t n_samples,
                      int channel, uint32_t event_id, uint32_t seq_num,
-                     double sample_period_ns, double peak_mv,
+                     double sample_period_ns, double peak_mv, double peak_freq_khz,
                      uint64_t energy, uint16_t ae_count, uint32_t duration,
                      uint32_t pretrig_samples, uint32_t pdt_samples,
                      uint32_t hdt_samples, uint32_t hlt_samples);

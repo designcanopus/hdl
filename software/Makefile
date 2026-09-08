@@ -1,7 +1,7 @@
 CROSS_COMPILE ?= arm-linux-gnueabihf-
 CC = $(CROSS_COMPILE)gcc
 CFLAGS ?= -O2 -Wall -Wextra -static
-LDFLAGS = -pthread -static
+LDFLAGS = -pthread -lm -static
 
 TARGET = event_dma_capture
 SRCS = event_dma_capture.c event_dma_hw.c event_dma_udp.c

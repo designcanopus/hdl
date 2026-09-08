@@ -12,6 +12,10 @@ add_files -norecurse -fileset sources_1 [file normalize [file join [file dirname
 add_files -norecurse -fileset sources_1 [file normalize [file join [file dirname [info script]] "Event_Capture_AXIL.v"]]
 add_files -norecurse -fileset sources_1 [file normalize [file join [file dirname [info script]] "Event_Capture_Buffer.v"]]
 add_files -norecurse -fileset sources_1 [file normalize [file join [file dirname [info script]] "Event_Capture_Detector.v"]]
+add_files -norecurse -fileset sources_1 [file normalize [file join [file dirname [info script]] "FFT_Magnitude_Squared.v"]]
+add_files -norecurse -fileset sources_1 [file normalize [file join [file dirname [info script]] "FFT_Peak_Detector.v"]]
+add_files -norecurse -fileset sources_1 [file normalize [file join [file dirname [info script]] "FFT_Peak_Finder.v"]]
+add_files -norecurse -fileset sources_1 [file normalize [file join [file dirname [info script]] "FFT_Frame_Sync.v"]]
 
 # Hardcoded for AD4857: 16-bit data width, 8 channels
 set data_width 16
@@ -254,6 +258,11 @@ ad_connect axi_ad4857/adc_enable_0 ad4857_adc_pack/enable_0
 # Merge overflows
 ad_connect ad4857_adc_pack/fifo_wr_overflow axi_ad4857/adc_dovf
 
+# Shared Zero-pad helper constant for imaginary component
+ad_ip_instance xlconstant fft_imag_zero
+ad_ip_parameter fft_imag_zero CONFIG.CONST_WIDTH 16
+ad_ip_parameter fft_imag_zero CONFIG.CONST_VAL 0
+
 # Event Capture Pipeline 0 (Channel 0 -> DMA 0)
 
 set event_capture_0 [create_bd_cell -type module -reference Event_Capture event_capture_0]
@@ -261,32 +270,107 @@ set event_capture_0 [create_bd_cell -type module -reference Event_Capture event_
 ad_connect sys_cpu_clk $event_capture_0/clk
 ad_connect adc_reset   $event_capture_0/rst
 
-# Input side: real ADC stream from axi_ad4857 channel 0
 ad_connect axi_ad4857/adc_valid   $event_capture_0/s_axis_tvalid
 ad_connect axi_ad4857/adc_data_0  $event_capture_0/s_axis_tdata
 
-# Output side (Master AXI-Stream)
+# Shared FFT Frame Sync — generates s_axis_data_tlast every 4096 valid samples
+# (all 8 channels share the same adc_valid, so one instance fans out to all xfft ports)
+set fft_frame_sync [create_bd_cell -type module -reference FFT_Frame_Sync fft_frame_sync]
+ad_connect sys_cpu_clk  fft_frame_sync/clk
+ad_connect adc_reset    fft_frame_sync/rst
+ad_connect axi_ad4857/adc_valid fft_frame_sync/valid_in
+
+# Channel 0 4096-Point FFT IP Pipeline
+ad_ip_instance xfft ad4857_fft_0
+ad_ip_parameter ad4857_fft_0 CONFIG.transform_length 4096
+ad_ip_parameter ad4857_fft_0 CONFIG.implementation_options radix_2_burst_io
+ad_ip_parameter ad4857_fft_0 CONFIG.target_clock_frequency 100
+ad_ip_parameter ad4857_fft_0 CONFIG.data_format fixed_point
+ad_ip_parameter ad4857_fft_0 CONFIG.input_width 16
+ad_ip_parameter ad4857_fft_0 CONFIG.output_ordering natural_order
+ad_ip_parameter ad4857_fft_0 CONFIG.scaling_options scaled
+
+ad_connect sys_cpu_clk ad4857_fft_0/aclk
+
+ad_ip_instance xlconcat fft_data_concat_0
+ad_ip_parameter fft_data_concat_0 CONFIG.NUM_PORTS 2
+ad_ip_parameter fft_data_concat_0 CONFIG.IN0_WIDTH 16
+ad_ip_parameter fft_data_concat_0 CONFIG.IN1_WIDTH 16
+
+ad_connect axi_ad4857/adc_data_0           fft_data_concat_0/In0
+ad_connect fft_imag_zero/dout              fft_data_concat_0/In1
+
+set fft_peak_finder_0 [create_bd_cell -type module -reference FFT_Peak_Finder fft_peak_finder_0]
+ad_connect sys_cpu_clk $fft_peak_finder_0/clk
+ad_connect adc_reset   $fft_peak_finder_0/rst
+
+ad_connect fft_data_concat_0/dout          ad4857_fft_0/s_axis_data_tdata
+ad_connect axi_ad4857/adc_valid           ad4857_fft_0/s_axis_data_tvalid
+ad_connect fft_frame_sync/tlast_out       ad4857_fft_0/s_axis_data_tlast
+
+ad_connect ad4857_fft_0/m_axis_data_tdata   $fft_peak_finder_0/s_axis_tdata
+ad_connect ad4857_fft_0/m_axis_data_tvalid  $fft_peak_finder_0/s_axis_tvalid
+ad_connect ad4857_fft_0/m_axis_data_tlast   $fft_peak_finder_0/s_axis_tlast
+ad_connect $fft_peak_finder_0/s_axis_tready ad4857_fft_0/m_axis_data_tready
+
+ad_connect $fft_peak_finder_0/peak_bin_reg $event_capture_0/fft_peak_bin
+
 ad_connect $event_capture_0/m_axis_tdata   ad4857_event_dma_0/s_axis_data
 ad_connect $event_capture_0/m_axis_tvalid  ad4857_event_dma_0/s_axis_valid
 ad_connect $event_capture_0/m_axis_tlast   ad4857_event_dma_0/s_axis_last
 ad_connect $event_capture_0/m_axis_tready  ad4857_event_dma_0/s_axis_ready
 
+
 # Event Capture Pipeline 1 (Channel 1 -> DMA 1)
 
-set event_capture [create_bd_cell -type module -reference Event_Capture event_capture_1]
+set event_capture_1 [create_bd_cell -type module -reference Event_Capture event_capture_1]
 
-ad_connect sys_cpu_clk $event_capture/clk
-ad_connect adc_reset   $event_capture/rst
+ad_connect sys_cpu_clk $event_capture_1/clk
+ad_connect adc_reset   $event_capture_1/rst
 
-# Input side: real ADC stream from axi_ad4857 channel 1
-ad_connect axi_ad4857/adc_valid   $event_capture/s_axis_tvalid
-ad_connect axi_ad4857/adc_data_1  $event_capture/s_axis_tdata
+ad_connect axi_ad4857/adc_valid   $event_capture_1/s_axis_tvalid
+ad_connect axi_ad4857/adc_data_1  $event_capture_1/s_axis_tdata
 
-# Output side (Master AXI-Stream)
-ad_connect $event_capture/m_axis_tdata   ad4857_event_dma/s_axis_data
-ad_connect $event_capture/m_axis_tvalid  ad4857_event_dma/s_axis_valid
-ad_connect $event_capture/m_axis_tlast   ad4857_event_dma/s_axis_last
-ad_connect $event_capture/m_axis_tready  ad4857_event_dma/s_axis_ready
+# Channel 1 4096-Point FFT IP Pipeline
+ad_ip_instance xfft ad4857_fft_1
+ad_ip_parameter ad4857_fft_1 CONFIG.transform_length 4096
+ad_ip_parameter ad4857_fft_1 CONFIG.implementation_options radix_2_burst_io
+ad_ip_parameter ad4857_fft_1 CONFIG.target_clock_frequency 100
+ad_ip_parameter ad4857_fft_1 CONFIG.data_format fixed_point
+ad_ip_parameter ad4857_fft_1 CONFIG.input_width 16
+ad_ip_parameter ad4857_fft_1 CONFIG.output_ordering natural_order
+ad_ip_parameter ad4857_fft_1 CONFIG.scaling_options scaled
+
+ad_connect sys_cpu_clk ad4857_fft_1/aclk
+
+ad_ip_instance xlconcat fft_data_concat_1
+ad_ip_parameter fft_data_concat_1 CONFIG.NUM_PORTS 2
+ad_ip_parameter fft_data_concat_1 CONFIG.IN0_WIDTH 16
+ad_ip_parameter fft_data_concat_1 CONFIG.IN1_WIDTH 16
+
+ad_connect axi_ad4857/adc_data_1           fft_data_concat_1/In0
+ad_connect fft_imag_zero/dout              fft_data_concat_1/In1
+
+set fft_peak_finder_1 [create_bd_cell -type module -reference FFT_Peak_Finder fft_peak_finder_1]
+ad_connect sys_cpu_clk $fft_peak_finder_1/clk
+ad_connect adc_reset   $fft_peak_finder_1/rst
+
+ad_connect fft_data_concat_1/dout          ad4857_fft_1/s_axis_data_tdata
+ad_connect axi_ad4857/adc_valid           ad4857_fft_1/s_axis_data_tvalid
+ad_connect fft_frame_sync/tlast_out       ad4857_fft_1/s_axis_data_tlast
+
+ad_connect ad4857_fft_1/m_axis_data_tdata   $fft_peak_finder_1/s_axis_tdata
+ad_connect ad4857_fft_1/m_axis_data_tvalid  $fft_peak_finder_1/s_axis_tvalid
+ad_connect ad4857_fft_1/m_axis_data_tlast   $fft_peak_finder_1/s_axis_tlast
+ad_connect $fft_peak_finder_1/s_axis_tready ad4857_fft_1/m_axis_data_tready
+
+ad_connect $fft_peak_finder_1/peak_bin_reg $event_capture_1/fft_peak_bin
+
+ad_connect $event_capture_1/m_axis_tdata   ad4857_event_dma/s_axis_data
+ad_connect $event_capture_1/m_axis_tvalid  ad4857_event_dma/s_axis_valid
+ad_connect $event_capture_1/m_axis_tlast   ad4857_event_dma/s_axis_last
+ad_connect $event_capture_1/m_axis_tready  ad4857_event_dma/s_axis_ready
+
 
 # Event Capture Pipeline 2 (Channel 2 -> DMA 2)
 
@@ -295,15 +379,49 @@ set event_capture_2 [create_bd_cell -type module -reference Event_Capture event_
 ad_connect sys_cpu_clk $event_capture_2/clk
 ad_connect adc_reset   $event_capture_2/rst
 
-# Input side: real ADC stream from axi_ad4857 channel 2
 ad_connect axi_ad4857/adc_valid   $event_capture_2/s_axis_tvalid
 ad_connect axi_ad4857/adc_data_2  $event_capture_2/s_axis_tdata
 
-# Output side (Master AXI-Stream)
+# Channel 2 4096-Point FFT IP Pipeline
+ad_ip_instance xfft ad4857_fft_2
+ad_ip_parameter ad4857_fft_2 CONFIG.transform_length 4096
+ad_ip_parameter ad4857_fft_2 CONFIG.implementation_options radix_2_burst_io
+ad_ip_parameter ad4857_fft_2 CONFIG.target_clock_frequency 100
+ad_ip_parameter ad4857_fft_2 CONFIG.data_format fixed_point
+ad_ip_parameter ad4857_fft_2 CONFIG.input_width 16
+ad_ip_parameter ad4857_fft_2 CONFIG.output_ordering natural_order
+ad_ip_parameter ad4857_fft_2 CONFIG.scaling_options scaled
+
+ad_connect sys_cpu_clk ad4857_fft_2/aclk
+
+ad_ip_instance xlconcat fft_data_concat_2
+ad_ip_parameter fft_data_concat_2 CONFIG.NUM_PORTS 2
+ad_ip_parameter fft_data_concat_2 CONFIG.IN0_WIDTH 16
+ad_ip_parameter fft_data_concat_2 CONFIG.IN1_WIDTH 16
+
+ad_connect axi_ad4857/adc_data_2           fft_data_concat_2/In0
+ad_connect fft_imag_zero/dout              fft_data_concat_2/In1
+
+set fft_peak_finder_2 [create_bd_cell -type module -reference FFT_Peak_Finder fft_peak_finder_2]
+ad_connect sys_cpu_clk $fft_peak_finder_2/clk
+ad_connect adc_reset   $fft_peak_finder_2/rst
+
+ad_connect fft_data_concat_2/dout          ad4857_fft_2/s_axis_data_tdata
+ad_connect axi_ad4857/adc_valid           ad4857_fft_2/s_axis_data_tvalid
+ad_connect fft_frame_sync/tlast_out       ad4857_fft_2/s_axis_data_tlast
+
+ad_connect ad4857_fft_2/m_axis_data_tdata   $fft_peak_finder_2/s_axis_tdata
+ad_connect ad4857_fft_2/m_axis_data_tvalid  $fft_peak_finder_2/s_axis_tvalid
+ad_connect ad4857_fft_2/m_axis_data_tlast   $fft_peak_finder_2/s_axis_tlast
+ad_connect $fft_peak_finder_2/s_axis_tready ad4857_fft_2/m_axis_data_tready
+
+ad_connect $fft_peak_finder_2/peak_bin_reg $event_capture_2/fft_peak_bin
+
 ad_connect $event_capture_2/m_axis_tdata   ad4857_event_dma_2/s_axis_data
 ad_connect $event_capture_2/m_axis_tvalid  ad4857_event_dma_2/s_axis_valid
 ad_connect $event_capture_2/m_axis_tlast   ad4857_event_dma_2/s_axis_last
 ad_connect $event_capture_2/m_axis_tready  ad4857_event_dma_2/s_axis_ready
+
 
 # Event Capture Pipeline 3 (Channel 3 -> DMA 3)
 
@@ -312,15 +430,49 @@ set event_capture_3 [create_bd_cell -type module -reference Event_Capture event_
 ad_connect sys_cpu_clk $event_capture_3/clk
 ad_connect adc_reset   $event_capture_3/rst
 
-# Input side: real ADC stream from axi_ad4857 channel 3
 ad_connect axi_ad4857/adc_valid   $event_capture_3/s_axis_tvalid
 ad_connect axi_ad4857/adc_data_3  $event_capture_3/s_axis_tdata
 
-# Output side (Master AXI-Stream)
+# Channel 3 4096-Point FFT IP Pipeline
+ad_ip_instance xfft ad4857_fft_3
+ad_ip_parameter ad4857_fft_3 CONFIG.transform_length 4096
+ad_ip_parameter ad4857_fft_3 CONFIG.implementation_options radix_2_burst_io
+ad_ip_parameter ad4857_fft_3 CONFIG.target_clock_frequency 100
+ad_ip_parameter ad4857_fft_3 CONFIG.data_format fixed_point
+ad_ip_parameter ad4857_fft_3 CONFIG.input_width 16
+ad_ip_parameter ad4857_fft_3 CONFIG.output_ordering natural_order
+ad_ip_parameter ad4857_fft_3 CONFIG.scaling_options scaled
+
+ad_connect sys_cpu_clk ad4857_fft_3/aclk
+
+ad_ip_instance xlconcat fft_data_concat_3
+ad_ip_parameter fft_data_concat_3 CONFIG.NUM_PORTS 2
+ad_ip_parameter fft_data_concat_3 CONFIG.IN0_WIDTH 16
+ad_ip_parameter fft_data_concat_3 CONFIG.IN1_WIDTH 16
+
+ad_connect axi_ad4857/adc_data_3           fft_data_concat_3/In0
+ad_connect fft_imag_zero/dout              fft_data_concat_3/In1
+
+set fft_peak_finder_3 [create_bd_cell -type module -reference FFT_Peak_Finder fft_peak_finder_3]
+ad_connect sys_cpu_clk $fft_peak_finder_3/clk
+ad_connect adc_reset   $fft_peak_finder_3/rst
+
+ad_connect fft_data_concat_3/dout          ad4857_fft_3/s_axis_data_tdata
+ad_connect axi_ad4857/adc_valid           ad4857_fft_3/s_axis_data_tvalid
+ad_connect fft_frame_sync/tlast_out       ad4857_fft_3/s_axis_data_tlast
+
+ad_connect ad4857_fft_3/m_axis_data_tdata   $fft_peak_finder_3/s_axis_tdata
+ad_connect ad4857_fft_3/m_axis_data_tvalid  $fft_peak_finder_3/s_axis_tvalid
+ad_connect ad4857_fft_3/m_axis_data_tlast   $fft_peak_finder_3/s_axis_tlast
+ad_connect $fft_peak_finder_3/s_axis_tready ad4857_fft_3/m_axis_data_tready
+
+ad_connect $fft_peak_finder_3/peak_bin_reg $event_capture_3/fft_peak_bin
+
 ad_connect $event_capture_3/m_axis_tdata   ad4857_event_dma_3/s_axis_data
 ad_connect $event_capture_3/m_axis_tvalid  ad4857_event_dma_3/s_axis_valid
 ad_connect $event_capture_3/m_axis_tlast   ad4857_event_dma_3/s_axis_last
 ad_connect $event_capture_3/m_axis_tready  ad4857_event_dma_3/s_axis_ready
+
 
 # Event Capture Pipeline 4 (Channel 4 -> DMA 4)
 
@@ -329,15 +481,49 @@ set event_capture_4 [create_bd_cell -type module -reference Event_Capture event_
 ad_connect sys_cpu_clk $event_capture_4/clk
 ad_connect adc_reset   $event_capture_4/rst
 
-# Input side: real ADC stream from axi_ad4857 channel 4
 ad_connect axi_ad4857/adc_valid   $event_capture_4/s_axis_tvalid
 ad_connect axi_ad4857/adc_data_4  $event_capture_4/s_axis_tdata
 
-# Output side (Master AXI-Stream)
+# Channel 4 4096-Point FFT IP Pipeline
+ad_ip_instance xfft ad4857_fft_4
+ad_ip_parameter ad4857_fft_4 CONFIG.transform_length 4096
+ad_ip_parameter ad4857_fft_4 CONFIG.implementation_options radix_2_burst_io
+ad_ip_parameter ad4857_fft_4 CONFIG.target_clock_frequency 100
+ad_ip_parameter ad4857_fft_4 CONFIG.data_format fixed_point
+ad_ip_parameter ad4857_fft_4 CONFIG.input_width 16
+ad_ip_parameter ad4857_fft_4 CONFIG.output_ordering natural_order
+ad_ip_parameter ad4857_fft_4 CONFIG.scaling_options scaled
+
+ad_connect sys_cpu_clk ad4857_fft_4/aclk
+
+ad_ip_instance xlconcat fft_data_concat_4
+ad_ip_parameter fft_data_concat_4 CONFIG.NUM_PORTS 2
+ad_ip_parameter fft_data_concat_4 CONFIG.IN0_WIDTH 16
+ad_ip_parameter fft_data_concat_4 CONFIG.IN1_WIDTH 16
+
+ad_connect axi_ad4857/adc_data_4           fft_data_concat_4/In0
+ad_connect fft_imag_zero/dout              fft_data_concat_4/In1
+
+set fft_peak_finder_4 [create_bd_cell -type module -reference FFT_Peak_Finder fft_peak_finder_4]
+ad_connect sys_cpu_clk $fft_peak_finder_4/clk
+ad_connect adc_reset   $fft_peak_finder_4/rst
+
+ad_connect fft_data_concat_4/dout          ad4857_fft_4/s_axis_data_tdata
+ad_connect axi_ad4857/adc_valid           ad4857_fft_4/s_axis_data_tvalid
+ad_connect fft_frame_sync/tlast_out       ad4857_fft_4/s_axis_data_tlast
+
+ad_connect ad4857_fft_4/m_axis_data_tdata   $fft_peak_finder_4/s_axis_tdata
+ad_connect ad4857_fft_4/m_axis_data_tvalid  $fft_peak_finder_4/s_axis_tvalid
+ad_connect ad4857_fft_4/m_axis_data_tlast   $fft_peak_finder_4/s_axis_tlast
+ad_connect $fft_peak_finder_4/s_axis_tready ad4857_fft_4/m_axis_data_tready
+
+ad_connect $fft_peak_finder_4/peak_bin_reg $event_capture_4/fft_peak_bin
+
 ad_connect $event_capture_4/m_axis_tdata   ad4857_event_dma_4/s_axis_data
 ad_connect $event_capture_4/m_axis_tvalid  ad4857_event_dma_4/s_axis_valid
 ad_connect $event_capture_4/m_axis_tlast   ad4857_event_dma_4/s_axis_last
 ad_connect $event_capture_4/m_axis_tready  ad4857_event_dma_4/s_axis_ready
+
 
 # Event Capture Pipeline 5 (Channel 5 -> DMA 5)
 
@@ -346,15 +532,49 @@ set event_capture_5 [create_bd_cell -type module -reference Event_Capture event_
 ad_connect sys_cpu_clk $event_capture_5/clk
 ad_connect adc_reset   $event_capture_5/rst
 
-# Input side: real ADC stream from axi_ad4857 channel 5
 ad_connect axi_ad4857/adc_valid   $event_capture_5/s_axis_tvalid
 ad_connect axi_ad4857/adc_data_5  $event_capture_5/s_axis_tdata
 
-# Output side (Master AXI-Stream)
+# Channel 5 4096-Point FFT IP Pipeline
+ad_ip_instance xfft ad4857_fft_5
+ad_ip_parameter ad4857_fft_5 CONFIG.transform_length 4096
+ad_ip_parameter ad4857_fft_5 CONFIG.implementation_options radix_2_burst_io
+ad_ip_parameter ad4857_fft_5 CONFIG.target_clock_frequency 100
+ad_ip_parameter ad4857_fft_5 CONFIG.data_format fixed_point
+ad_ip_parameter ad4857_fft_5 CONFIG.input_width 16
+ad_ip_parameter ad4857_fft_5 CONFIG.output_ordering natural_order
+ad_ip_parameter ad4857_fft_5 CONFIG.scaling_options scaled
+
+ad_connect sys_cpu_clk ad4857_fft_5/aclk
+
+ad_ip_instance xlconcat fft_data_concat_5
+ad_ip_parameter fft_data_concat_5 CONFIG.NUM_PORTS 2
+ad_ip_parameter fft_data_concat_5 CONFIG.IN0_WIDTH 16
+ad_ip_parameter fft_data_concat_5 CONFIG.IN1_WIDTH 16
+
+ad_connect axi_ad4857/adc_data_5           fft_data_concat_5/In0
+ad_connect fft_imag_zero/dout              fft_data_concat_5/In1
+
+set fft_peak_finder_5 [create_bd_cell -type module -reference FFT_Peak_Finder fft_peak_finder_5]
+ad_connect sys_cpu_clk $fft_peak_finder_5/clk
+ad_connect adc_reset   $fft_peak_finder_5/rst
+
+ad_connect fft_data_concat_5/dout          ad4857_fft_5/s_axis_data_tdata
+ad_connect axi_ad4857/adc_valid           ad4857_fft_5/s_axis_data_tvalid
+ad_connect fft_frame_sync/tlast_out       ad4857_fft_5/s_axis_data_tlast
+
+ad_connect ad4857_fft_5/m_axis_data_tdata   $fft_peak_finder_5/s_axis_tdata
+ad_connect ad4857_fft_5/m_axis_data_tvalid  $fft_peak_finder_5/s_axis_tvalid
+ad_connect ad4857_fft_5/m_axis_data_tlast   $fft_peak_finder_5/s_axis_tlast
+ad_connect $fft_peak_finder_5/s_axis_tready ad4857_fft_5/m_axis_data_tready
+
+ad_connect $fft_peak_finder_5/peak_bin_reg $event_capture_5/fft_peak_bin
+
 ad_connect $event_capture_5/m_axis_tdata   ad4857_event_dma_5/s_axis_data
 ad_connect $event_capture_5/m_axis_tvalid  ad4857_event_dma_5/s_axis_valid
 ad_connect $event_capture_5/m_axis_tlast   ad4857_event_dma_5/s_axis_last
 ad_connect $event_capture_5/m_axis_tready  ad4857_event_dma_5/s_axis_ready
+
 
 # Event Capture Pipeline 6 (Channel 6 -> DMA 6)
 
@@ -363,15 +583,49 @@ set event_capture_6 [create_bd_cell -type module -reference Event_Capture event_
 ad_connect sys_cpu_clk $event_capture_6/clk
 ad_connect adc_reset   $event_capture_6/rst
 
-# Input side: real ADC stream from axi_ad4857 channel 6
 ad_connect axi_ad4857/adc_valid   $event_capture_6/s_axis_tvalid
 ad_connect axi_ad4857/adc_data_6  $event_capture_6/s_axis_tdata
 
-# Output side (Master AXI-Stream)
+# Channel 6 4096-Point FFT IP Pipeline
+ad_ip_instance xfft ad4857_fft_6
+ad_ip_parameter ad4857_fft_6 CONFIG.transform_length 4096
+ad_ip_parameter ad4857_fft_6 CONFIG.implementation_options radix_2_burst_io
+ad_ip_parameter ad4857_fft_6 CONFIG.target_clock_frequency 100
+ad_ip_parameter ad4857_fft_6 CONFIG.data_format fixed_point
+ad_ip_parameter ad4857_fft_6 CONFIG.input_width 16
+ad_ip_parameter ad4857_fft_6 CONFIG.output_ordering natural_order
+ad_ip_parameter ad4857_fft_6 CONFIG.scaling_options scaled
+
+ad_connect sys_cpu_clk ad4857_fft_6/aclk
+
+ad_ip_instance xlconcat fft_data_concat_6
+ad_ip_parameter fft_data_concat_6 CONFIG.NUM_PORTS 2
+ad_ip_parameter fft_data_concat_6 CONFIG.IN0_WIDTH 16
+ad_ip_parameter fft_data_concat_6 CONFIG.IN1_WIDTH 16
+
+ad_connect axi_ad4857/adc_data_6           fft_data_concat_6/In0
+ad_connect fft_imag_zero/dout              fft_data_concat_6/In1
+
+set fft_peak_finder_6 [create_bd_cell -type module -reference FFT_Peak_Finder fft_peak_finder_6]
+ad_connect sys_cpu_clk $fft_peak_finder_6/clk
+ad_connect adc_reset   $fft_peak_finder_6/rst
+
+ad_connect fft_data_concat_6/dout          ad4857_fft_6/s_axis_data_tdata
+ad_connect axi_ad4857/adc_valid           ad4857_fft_6/s_axis_data_tvalid
+ad_connect fft_frame_sync/tlast_out       ad4857_fft_6/s_axis_data_tlast
+
+ad_connect ad4857_fft_6/m_axis_data_tdata   $fft_peak_finder_6/s_axis_tdata
+ad_connect ad4857_fft_6/m_axis_data_tvalid  $fft_peak_finder_6/s_axis_tvalid
+ad_connect ad4857_fft_6/m_axis_data_tlast   $fft_peak_finder_6/s_axis_tlast
+ad_connect $fft_peak_finder_6/s_axis_tready ad4857_fft_6/m_axis_data_tready
+
+ad_connect $fft_peak_finder_6/peak_bin_reg $event_capture_6/fft_peak_bin
+
 ad_connect $event_capture_6/m_axis_tdata   ad4857_event_dma_6/s_axis_data
 ad_connect $event_capture_6/m_axis_tvalid  ad4857_event_dma_6/s_axis_valid
 ad_connect $event_capture_6/m_axis_tlast   ad4857_event_dma_6/s_axis_last
 ad_connect $event_capture_6/m_axis_tready  ad4857_event_dma_6/s_axis_ready
+
 
 # Event Capture Pipeline 7 (Channel 7 -> DMA 7)
 
@@ -380,11 +634,44 @@ set event_capture_7 [create_bd_cell -type module -reference Event_Capture event_
 ad_connect sys_cpu_clk $event_capture_7/clk
 ad_connect adc_reset   $event_capture_7/rst
 
-# Input side: real ADC stream from axi_ad4857 channel 7
 ad_connect axi_ad4857/adc_valid   $event_capture_7/s_axis_tvalid
 ad_connect axi_ad4857/adc_data_7  $event_capture_7/s_axis_tdata
 
-# Output side (Master AXI-Stream)
+# Channel 7 4096-Point FFT IP Pipeline
+ad_ip_instance xfft ad4857_fft_7
+ad_ip_parameter ad4857_fft_7 CONFIG.transform_length 4096
+ad_ip_parameter ad4857_fft_7 CONFIG.implementation_options radix_2_burst_io
+ad_ip_parameter ad4857_fft_7 CONFIG.target_clock_frequency 100
+ad_ip_parameter ad4857_fft_7 CONFIG.data_format fixed_point
+ad_ip_parameter ad4857_fft_7 CONFIG.input_width 16
+ad_ip_parameter ad4857_fft_7 CONFIG.output_ordering natural_order
+ad_ip_parameter ad4857_fft_7 CONFIG.scaling_options scaled
+
+ad_connect sys_cpu_clk ad4857_fft_7/aclk
+
+ad_ip_instance xlconcat fft_data_concat_7
+ad_ip_parameter fft_data_concat_7 CONFIG.NUM_PORTS 2
+ad_ip_parameter fft_data_concat_7 CONFIG.IN0_WIDTH 16
+ad_ip_parameter fft_data_concat_7 CONFIG.IN1_WIDTH 16
+
+ad_connect axi_ad4857/adc_data_7           fft_data_concat_7/In0
+ad_connect fft_imag_zero/dout              fft_data_concat_7/In1
+
+set fft_peak_finder_7 [create_bd_cell -type module -reference FFT_Peak_Finder fft_peak_finder_7]
+ad_connect sys_cpu_clk $fft_peak_finder_7/clk
+ad_connect adc_reset   $fft_peak_finder_7/rst
+
+ad_connect fft_data_concat_7/dout          ad4857_fft_7/s_axis_data_tdata
+ad_connect axi_ad4857/adc_valid           ad4857_fft_7/s_axis_data_tvalid
+ad_connect fft_frame_sync/tlast_out       ad4857_fft_7/s_axis_data_tlast
+
+ad_connect ad4857_fft_7/m_axis_data_tdata   $fft_peak_finder_7/s_axis_tdata
+ad_connect ad4857_fft_7/m_axis_data_tvalid  $fft_peak_finder_7/s_axis_tvalid
+ad_connect ad4857_fft_7/m_axis_data_tlast   $fft_peak_finder_7/s_axis_tlast
+ad_connect $fft_peak_finder_7/s_axis_tready ad4857_fft_7/m_axis_data_tready
+
+ad_connect $fft_peak_finder_7/peak_bin_reg $event_capture_7/fft_peak_bin
+
 ad_connect $event_capture_7/m_axis_tdata   ad4857_event_dma_7/s_axis_data
 ad_connect $event_capture_7/m_axis_tvalid  ad4857_event_dma_7/s_axis_valid
 ad_connect $event_capture_7/m_axis_tlast   ad4857_event_dma_7/s_axis_last
@@ -417,7 +704,7 @@ ad_cpu_interconnect 0x43e00000 ad4857_event_dma_0
 ad_cpu_interconnect 0x43f00000 ad4857_event_dma
 ad_cpu_interconnect 0x44000000 adc_clkgen
 ad_cpu_interconnect 0x44100000 ad4857_event_dma_2
-ad_cpu_interconnect 0x44200000 $event_capture
+ad_cpu_interconnect 0x44200000 $event_capture_1
 ad_cpu_interconnect 0x44300000 $event_capture_2
 ad_cpu_interconnect 0x44400000 ad4857_event_dma_3
 ad_cpu_interconnect 0x44500000 $event_capture_3
@@ -431,6 +718,7 @@ ad_cpu_interconnect 0x44c00000 ad4857_event_dma_7
 ad_cpu_interconnect 0x44d00000 $event_capture_7
 ad_cpu_interconnect 0x44e00000 $event_capture_0
 ad_cpu_interconnect 0x44f00000 ad4857_dma
+# NOTE: fft_peak_finder_0 has no AXI-Lite interface - results go via ad4857_event_dma_0
 
 ad_mem_hp1_interconnect sys_cpu_clk    sys_ps7/S_AXI_HP1
 ad_mem_hp1_interconnect $sys_dma_clk   ad4857_dma/m_dest_axi
