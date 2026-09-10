@@ -44,10 +44,6 @@ create_bd_port -dir O hdmi_vsync
 create_bd_port -dir O hdmi_data_e
 create_bd_port -dir O -from 15 -to 0 hdmi_data
 
-# i2s
-
-create_bd_port -dir O -type clk i2s_mclk
-create_bd_intf_port -mode Master -vlnv analog.com:interface:i2s_rtl:1.0 i2s
 
 # iic mux
 
@@ -60,9 +56,6 @@ create_bd_port -dir O iic_mux_sda_t
 
 create_bd_port -dir I otg_vbusoc
 
-# spdif audio
-
-create_bd_port -dir O spdif
 
 # instance: sys_ps7
 
@@ -78,9 +71,6 @@ ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_HP0 1
 ad_ip_parameter sys_ps7 CONFIG.PCW_IRQ_F2P_INTR 1
 ad_ip_parameter sys_ps7 CONFIG.PCW_GPIO_EMIO_GPIO_ENABLE 1
 ad_ip_parameter sys_ps7 CONFIG.PCW_GPIO_EMIO_GPIO_IO 64
-ad_ip_parameter sys_ps7 CONFIG.PCW_USE_DMA0 1
-ad_ip_parameter sys_ps7 CONFIG.PCW_USE_DMA1 1
-ad_ip_parameter sys_ps7 CONFIG.PCW_USE_DMA2 1
 ad_ip_parameter sys_ps7 CONFIG.PCW_IRQ_F2P_MODE REVERSE
 ad_ip_parameter sys_ps7 CONFIG.PCW_SPI0_PERIPHERAL_ENABLE 1
 ad_ip_parameter sys_ps7 CONFIG.PCW_SPI0_SPI0_IO EMIO
@@ -120,23 +110,6 @@ ad_ip_parameter axi_hdmi_dma CONFIG.AXI_SLICE_DEST 0
 ad_ip_parameter axi_hdmi_dma CONFIG.DMA_2D_TRANSFER true
 ad_ip_parameter axi_hdmi_dma CONFIG.DMA_DATA_WIDTH_SRC 64
 
-# audio peripherals
-
-ad_ip_instance clk_wiz sys_audio_clkgen
-ad_ip_parameter sys_audio_clkgen CONFIG.CLKOUT1_REQUESTED_OUT_FREQ 12.288
-ad_ip_parameter sys_audio_clkgen CONFIG.USE_LOCKED false
-ad_ip_parameter sys_audio_clkgen CONFIG.USE_RESET true
-ad_ip_parameter sys_audio_clkgen CONFIG.USE_PHASE_ALIGNMENT false
-ad_ip_parameter sys_audio_clkgen CONFIG.RESET_TYPE ACTIVE_LOW
-ad_ip_parameter sys_audio_clkgen CONFIG.PRIM_SOURCE No_buffer
-
-ad_ip_instance axi_spdif_tx axi_spdif_tx_core
-ad_ip_parameter axi_spdif_tx_core CONFIG.DMA_TYPE 1
-ad_ip_parameter axi_spdif_tx_core CONFIG.S_AXI_ADDRESS_WIDTH 16
-
-ad_ip_instance axi_i2s_adi axi_i2s_adi
-ad_ip_parameter axi_i2s_adi CONFIG.DMA_TYPE 1
-ad_ip_parameter axi_i2s_adi CONFIG.S_AXI_ADDRESS_WIDTH 16
 
 # iic (fmc)
 
@@ -231,37 +204,6 @@ ad_connect  sys_cpu_clk axi_hdmi_dma/s_axi_aclk
 ad_connect  sys_cpu_clk axi_hdmi_dma/m_src_axi_aclk
 ad_connect  sys_cpu_clk axi_hdmi_dma/m_axis_aclk
 
-# spdif audio
-
-ad_connect  sys_cpu_clk   axi_spdif_tx_core/DMA_REQ_ACLK
-ad_connect  sys_cpu_clk   sys_ps7/DMA0_ACLK
-
-ad_connect  sys_ps7/DMA0_REQ  axi_spdif_tx_core/DMA_REQ
-ad_connect  sys_ps7/DMA0_ACK  axi_spdif_tx_core/DMA_ACK
-ad_connect  sys_cpu_resetn    axi_spdif_tx_core/DMA_REQ_RSTN
-ad_connect  sys_200m_clk      sys_audio_clkgen/clk_in1
-ad_connect  sys_cpu_resetn    sys_audio_clkgen/resetn
-ad_connect  sys_audio_clkgen/clk_out1 axi_spdif_tx_core/spdif_data_clk
-ad_connect  spdif             axi_spdif_tx_core/spdif_tx_o
-
-# i2s audio
-
-ad_connect  sys_cpu_clk axi_i2s_adi/DMA_REQ_RX_ACLK
-ad_connect  sys_cpu_clk axi_i2s_adi/DMA_REQ_TX_ACLK
-ad_connect  sys_cpu_clk sys_ps7/DMA1_ACLK
-ad_connect  sys_cpu_clk sys_ps7/DMA2_ACLK
-
-ad_connect  sys_audio_clkgen/clk_out1   i2s_mclk
-ad_connect  sys_audio_clkgen/clk_out1   axi_i2s_adi/DATA_CLK_I
-
-ad_connect  i2s axi_i2s_adi/I2S
-
-ad_connect  sys_ps7/DMA1_REQ   axi_i2s_adi/DMA_REQ_TX
-ad_connect  sys_ps7/DMA1_ACK   axi_i2s_adi/DMA_ACK_TX
-ad_connect  sys_cpu_resetn     axi_i2s_adi/DMA_REQ_TX_RSTN
-ad_connect  sys_ps7/DMA2_REQ   axi_i2s_adi/DMA_REQ_RX
-ad_connect  sys_ps7/DMA2_ACK   axi_i2s_adi/DMA_ACK_RX
-ad_connect  sys_cpu_resetn     axi_i2s_adi/DMA_REQ_RX_RSTN
 
 # system id
 
@@ -299,8 +241,6 @@ ad_cpu_interconnect 0x45000000 axi_sysid_0
 ad_cpu_interconnect 0x79000000 axi_hdmi_clkgen
 ad_cpu_interconnect 0x43000000 axi_hdmi_dma
 ad_cpu_interconnect 0x70e00000 axi_hdmi_core
-ad_cpu_interconnect 0x75c00000 axi_spdif_tx_core
-ad_cpu_interconnect 0x77600000 axi_i2s_adi
 ad_cpu_interconnect 0x41620000 axi_iic_fmc
 
 ad_mem_hp0_interconnect sys_cpu_clk sys_ps7/S_AXI_HP0

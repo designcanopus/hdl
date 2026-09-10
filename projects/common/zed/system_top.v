@@ -62,19 +62,7 @@ module system_top (
 
   inout   [31:0]  gpio_bd,
 
-  output          hdmi_out_clk,
-  output          hdmi_vsync,
-  output          hdmi_hsync,
-  output          hdmi_data_e,
-  output  [15:0]  hdmi_data,
 
-  output          spdif,
-
-  output          i2s_mclk,
-  output          i2s_bclk,
-  output          i2s_lrclk,
-  output          i2s_sdata_out,
-  input           i2s_sdata_in,
 
   inout           iic_scl,
   inout           iic_sda,
@@ -152,19 +140,7 @@ module system_top (
     .gpio_o (gpio_o),
     .gpio_t (gpio_t),
 
-    .hdmi_data (hdmi_data),
-    .hdmi_data_e (hdmi_data_e),
-    .hdmi_hsync (hdmi_hsync),
-    .hdmi_out_clk (hdmi_out_clk),
-    .hdmi_vsync (hdmi_vsync),
 
-    .spdif (spdif),
-
-    .i2s_bclk (i2s_bclk),
-    .i2s_lrclk (i2s_lrclk),
-    .i2s_mclk (i2s_mclk),
-    .i2s_sdata_in (i2s_sdata_in),
-    .i2s_sdata_out (i2s_sdata_out),
     .iic_fmc_scl_io (iic_scl),
     .iic_fmc_sda_io (iic_sda),
     .iic_mux_scl_i (iic_mux_scl_i_s),

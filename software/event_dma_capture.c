@@ -222,6 +222,7 @@ static void *channel_worker_thread(void *arg)
         uint16_t ae_count     = energy_hi & 0xFFFF;
         #define ADC_GAIN_CAL 1.0  /* Unscaled raw ADC voltage conversion (5000 mV / 65536 LSB) */
         double   peak_mv      = peak * (ADC_FULL_SCALE_MV / ADC_CODES) * ADC_GAIN_CAL;
+        double   dBµV         = 20.0 * log10(peak_mv / 0.001) - 26.0;
         double   duration_ms  = duration * ctx->sample_period_ns / 1e6;
         double   rise_time_us = rise_time * ctx->sample_period_ns / 1000.0;
 
@@ -365,9 +366,9 @@ static void *channel_worker_thread(void *arg)
 
         double display_bin = exact_peak_bin * (1000.0 / ctx->sample_period_ns);
 
-        printf("[CH %d] Event %03u (ID: %u) | Magic: 0x%08X %s | Peak: %.2f mV | Peak Freq: %.3f kHz (Bin %.3f) | AE Count: %u | Rise: %.1f us | Duration: %u samples (%.3f ms)\n",
+        printf("[CH %d] Event %03u (ID: %u) | Magic: 0x%08X %s | Peak: %.2f mV (%.2f dBµV) | Peak Freq: %.3f kHz (Bin %.3f) | AE Count: %u | Rise: %.1f us | Duration: %u samples (%.3f ms)\n",
                channel, ev, event_id, magic, (magic == MAGIC_HEADER) ? "(OK)" : "(ERR)",
-               peak_mv, exact_freq_khz, display_bin, ae_count, rise_time_us, duration, duration_ms);
+               peak_mv, dBµV, exact_freq_khz, display_bin, ae_count, rise_time_us, duration, duration_ms);
 
         /* -f diagnostic: compare measured frequency against known reference */
         if (g_ref_freq_hz > 0.0) {
